@@ -267,10 +267,10 @@ fn get_env(name: &str) -> Option<String> {
 
 // Generate the bindings to grpc C-core.
 // Try to disable the generation of platform-related bindings.
-fn bindgen_grpc(mut config: bindgen::Builder, file_path: &PathBuf) {
+fn bindgen_grpc(mut config: bindgen::Builder, file_path: &PathBuf, grpc_include_dir: &PathBuf) {
     // Search header files with API interface
     let mut headers = Vec::new();
-    for result in WalkDir::new(Path::new("./grpc/include")) {
+    for result in WalkDir::new(grpc_include_dir) {
         let dent = result.expect("Error happened when search headers");
         if !dent.file_type().is_file() {
             continue;
@@ -296,7 +296,7 @@ fn bindgen_grpc(mut config: bindgen::Builder, file_path: &PathBuf) {
     let cfg = config
         .header("grpc_wrap.cc")
         .clang_arg("-xc++")
-        .clang_arg("-I./grpc/include")
+        .clang_arg(format!("-I{}", grpc_include_dir.display()))
         .clang_arg("-std=c++11")
         .rustfmt_bindings(true)
         .impl_debug(true)
@@ -331,7 +331,7 @@ fn bindgen_grpc(mut config: bindgen::Builder, file_path: &PathBuf) {
 // Determine if need to update bindings. Supported platforms do not
 // need to be updated by default unless the UPDATE_BIND is specified.
 // Other platforms use bindgen to generate the bindings every time.
-fn config_binding_path(config: bindgen::Builder) {
+fn config_binding_path(config: bindgen::Builder, grpc_include_dir: &PathBuf) {
     let file_path: PathBuf;
     let target = env::var("TARGET").unwrap();
     match target.as_str() {
@@ -345,12 +345,12 @@ fn config_binding_path(config: bindgen::Builder) {
                 .join("bindings")
                 .join(format!("{}-bindings.rs", &target));
             if env::var("UPDATE_BIND").map(|s| s == "1").unwrap_or(false) {
-                bindgen_grpc(config, &file_path);
+                bindgen_grpc(config, &file_path, grpc_include_dir);
             }
         }
         _ => {
             file_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("grpc-bindings.rs");
-            bindgen_grpc(config, &file_path);
+            bindgen_grpc(config, &file_path, grpc_include_dir);
         }
     };
     println!(
@@ -383,15 +383,23 @@ fn main() {
         bind_config = bind_config.clang_arg("-D _WIN32_WINNT=0x600");
     }
 
-    if get_env("GRPCIO_SYS_USE_PKG_CONFIG").map_or(false, |s| s == "1") {
+    let grpc_include_dir = if get_env("GRPCIO_SYS_USE_PKG_CONFIG").map_or(false, |s| s == "1") {
         // Print cargo metadata.
         let lib_core = probe_library(library, true);
+        let grpc_include_dir = lib_core
+            .include_paths
+            .iter()
+            .map(|inc_path| inc_path.join("grpc"))
+            .find(|grpc_include_path| grpc_include_path.is_dir())
+            .expect(&format!("Could not find grpc include dir in {:#?}", lib_core.include_paths));
         for inc_path in lib_core.include_paths {
             cc.include(inc_path);
         }
+        grpc_include_dir
     } else {
         build_grpc(&mut cc, library);
-    }
+        "./grpc/include".into()
+    };
 
     cc.cpp(true);
     if !cfg!(target_env = "msvc") {
@@ -401,5 +409,5 @@ fn main() {
     cc.warnings_into_errors(true);
     cc.compile("libgrpc_wrap.a");
 
-    config_binding_path(bind_config);
+    config_binding_path(bind_config, &grpc_include_dir);
 }
